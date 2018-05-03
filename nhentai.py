@@ -27,12 +27,15 @@ req.headers = {
     'Cache-Control': 'max-age=0',
 }
 
+#
+# 1ページ分のイメージを取得
+#
 
 def downloadImageFile(dir, imgurl):
     filename = dir + '/' + imgurl.split('/')[-1]
     print( "Download Image File=" + filename )
 
-    for retry in range(1, 10):
+    for retry in range(0, 10):
         try:
             r = req.get(imgurl, stream=True, timeout=(10.0, 10.0))
 
@@ -79,6 +82,7 @@ def mkdir(path):
         os.makedirs(path)
 
 #
+# zipファイルに圧縮
 #
 
 def zip_dir(dirname,zipfilename):
@@ -90,13 +94,17 @@ def zip_dir(dirname,zipfilename):
             for name in files:
                 filelist.append(os.path.join(root, name))
 
-    if (os.path.exists(zipfilename + '.zip')):
-        if (os.path.exists(zipfilename + '_.zip')):
-            zf = zipfile.ZipFile(zipfilename + '__.zip', "w", zipfile.zlib.DEFLATED)
+    # 同じファイルのzipファイルが存在するかチェック
+    r = ''
+    for i in range(0,10):
+        name = zipfilename + r + '.zip'
+        if (os.path.exists(name)):
+            r = r + '_'
+            continue
         else:
-            zf = zipfile.ZipFile(zipfilename + '_.zip', "w", zipfile.zlib.DEFLATED)
-    else:
-        zf = zipfile.ZipFile(zipfilename + '.zip', "w", zipfile.zlib.DEFLATED)
+            break
+
+    zf = zipfile.ZipFile(name, "w", zipfile.zlib.DEFLATED)
 
     for tar in filelist:
         arcname = tar[len(dirname):]
@@ -105,23 +113,32 @@ def zip_dir(dirname,zipfilename):
 
 #
 #
+#
 
 def download_pics(url):
-    if ('http://' in url) or ('https://' in url):
-        basedir = TMPPATH + '/' + 'tmpimg_' + url.split("/")[-1]
-        index = lxml.etree.HTML(req.get(url).text)
-        urlbase = ''
-    else:
-        basedir = TMPPATH + '/' + '123456'
-        index = lxml.etree.HTML(codecs.open(url, 'r', 'UTF-8').read())
-        urlbase = 'https:'
+    for retry in range(0, 11):
+        # タイトル・イメージリストの取得に失敗した場合終了する
+        if retry == 10:
+            print('Title and image list get error:' + url )
+            return False
+        if ('http://' in url) or ('https://' in url):
+            basedir = TMPPATH + '/' + 'tmpimg_' + url.split("/")[-1]
+            index = lxml.etree.HTML(req.get(url).text)
+            urlbase = ''
+        else:
+            basedir = TMPPATH + '/' + '123456'
+            index = lxml.etree.HTML(codecs.open(url, 'r', 'UTF-8').read())
+            urlbase = 'https:'
 
-    title = index.xpath('//div[@id="info"]/h2/text()')
-    if not title:
-        # 日本語のタイトルが無い場合
-        title = index.xpath('//div[@id="info"]/h1/text()')
+        title = index.xpath('//div[@id="info"]/h2/text()')
         if not title:
-            title = [str(time.time())]
+            # 日本語のタイトルが無い場合
+            title = index.xpath('//div[@id="info"]/h1/text()')
+            if not title:
+                # タイトルが取得出来ない場合、htmlの取得に失敗している可能性のためリトライを行う
+                continue
+        break
+
     title = title[0]
     print(title)
     basename = cleanPath(title)
@@ -137,6 +154,7 @@ def download_pics(url):
 
 #        print('picurl=' + picurl)
 
+        # 1ページ分のイメージを取得
         downloadImageFile(basedir + '/' + basename, picurl)
 
     # 圧縮
@@ -148,6 +166,7 @@ def download_pics(url):
     return True
 
 #
+# ファイル名に使用できない、使用しない方がいい文字を削除
 #
 
 def cleanPath(path):
@@ -158,6 +177,7 @@ def cleanPath(path):
     return path
 
 #
+# メイン
 #
 
 if __name__ == '__main__':
