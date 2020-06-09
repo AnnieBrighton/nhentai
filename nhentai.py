@@ -13,9 +13,9 @@ import getopt
 import shutil
 
 # ファイルをダウンロードし、zipファイルを作成する作業ディレクトリ
-TMPPATH='/tmp'
+TMPPATH = '/tmp'
 
-HTTP_CLIENT_CHUNK_SIZE=10240
+HTTP_CLIENT_CHUNK_SIZE = 10240
 
 req = requests.session()
 req.headers = {
@@ -31,9 +31,10 @@ req.headers = {
 # 1ページ分のイメージを取得
 #
 
+
 def downloadImageFile(dir, imgurl):
     filename = dir + '/' + imgurl.split('/')[-1]
-    print( "Download Image File=" + filename )
+    print("Download Image File=" + filename)
 
     for retry in range(0, 10):
         try:
@@ -43,12 +44,12 @@ def downloadImageFile(dir, imgurl):
             length = int(r.headers['Content-Length'])
 
             if (os.path.exists(filename)) and (os.stat(filename).st_size == length):
-                print( 'Used exists file:' + imgurl )
+                print('Used exists file:' + imgurl)
             else:
                 # ファイルが存在しない、または、ファイルサイズとダウンロードサイズが異なる。
                 with open(filename, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=4096):
-                        if chunk: # filter out keep-alive new chunks
+                        if chunk:  # filter out keep-alive new chunks
                             f.write(chunk)
                             f.flush()
                     f.close()
@@ -58,24 +59,25 @@ def downloadImageFile(dir, imgurl):
             if info.st_size == length:
                 return filename
             else:
-                print( 'Download size mismatch file size:' + str(info.st_size) + ' Content-Length:' + length )
+                print('Download size mismatch file size:' + str(info.st_size) + ' Content-Length:' + length)
                 continue
 
         except requests.exceptions.ConnectionError:
-            print( 'ConnectionError:' + imgurl )
+            print('ConnectionError:' + imgurl)
             continue
         except requests.exceptions.Timeout:
-            print( 'Timeout:' + imgurl )
+            print('Timeout:' + imgurl)
             continue
         except requests.exceptions.ReadTimeout:
-            print( 'Timeout:' + imgurl )
+            print('Timeout:' + imgurl)
             continue
 
     # リトライ回数をオーバーで終了
-    print( 'Retry over:' + imgurl )
+    print('Retry over:' + imgurl)
     sys.exit()
 #
 #
+
 
 def mkdir(path):
     if not os.path.exists(path):
@@ -85,18 +87,19 @@ def mkdir(path):
 # zipファイルに圧縮
 #
 
-def zip_dir(dirname,zipfilename):
+
+def zip_dir(dirname, zipfilename):
     filelist = []
     if os.path.isfile(dirname):
         filelist.append(dirname)
-    else :
+    else:
         for root, dirs, files in os.walk(dirname):
             for name in files:
                 filelist.append(os.path.join(root, name))
 
     # 同じファイルのzipファイルが存在するかチェック
     r = ''
-    for i in range(0,10):
+    for i in range(0, 10):
         name = zipfilename + r + '.zip'
         if (os.path.exists(name)):
             r = r + '_'
@@ -108,39 +111,59 @@ def zip_dir(dirname,zipfilename):
 
     for tar in filelist:
         arcname = tar[len(dirname):]
-        zf.write(tar,arcname)
+        zf.write(tar, arcname)
     zf.close()
 
 #
 #
 #
 
+
 def download_pics(url):
+    title = ''
+    basedir = TMPPATH + '/' + 'tmpimg_' + url.split("/")[-1]
+    mkdir(basedir)
+
     for retry in range(0, 11):
         # タイトル・イメージリストの取得に失敗した場合終了する
         if retry == 10:
-            print('Title and image list get error:' + url )
+            print('Title and image list get error:' + url)
             return False
-        if ('http://' in url) or ('https://' in url):
-            basedir = TMPPATH + '/' + 'tmpimg_' + url.split("/")[-1]
-            index = lxml.etree.HTML(req.get(url).text)
-            urlbase = ''
-        else:
-            basedir = TMPPATH + '/' + '123456'
-            index = lxml.etree.HTML(codecs.open(url, 'r', 'UTF-8').read())
-            urlbase = 'https:'
 
-        title = index.xpath('//div[@id="info"]/h2/text()')
-        if not title:
-            # 日本語のタイトルが無い場合
-            title = index.xpath('//div[@id="info"]/h1/text()')
-            if not title:
-                # タイトルが取得出来ない場合、htmlの取得に失敗している可能性のためリトライを行う
-                continue
+        index = lxml.etree.HTML(req.get(url).text)
+
+        # < divid = "info" >
+        #  < h1 class = "title" >
+        #    <span class="before"></span>
+        #    <span class="pretty">COMIC Ananga Ranga Vol. 60</span>
+        #    <span class="after"></span>
+        #   </h1>
+        #  <h2 class="title">
+        #   <span class="before"></span>
+        #   <span class="pretty">アナンガ・ランガ Vol. 60</span>
+        #   <span class="after"></span>
+        #  </h2>
+
+        info = index.xpath('//*[@id="info"]/*[@class="title"]')
+        if len(info) == 0:
+            # タイトルが取得出来ない場合、htmlの取得に失敗している可能性のためリトライを行う
+            continue
+
+        # info配下が一つの場合、英語表記のみ取得、それ以外は日本語表記を取得する。
+        if len(info) == 1:
+            info = info[0]
+        else:
+            info = info[1]
+
+        #print(lxml.etree.tostring(info, pretty_print=True))
+        for span in info.xpath('span'):
+            #print(lxml.etree.tostring(span, pretty_print=True))
+            if span.text and span.text != '[DL版]':
+                title = title + span.text
+        print(title)
+
         break
 
-    title = title[0]
-    print(title)
     basename = cleanPath(title)
     print(basedir + '/' + basename)
     mkdir(basedir + '/' + basename)
@@ -150,7 +173,7 @@ def download_pics(url):
     for imgtag in AllImgURL:
         picurl = imgtag.attrib['data-src']
         picurl = picurl.replace('t.nhentai.net', 'i.nhentai.net')
-        picurl = urlbase + re.sub(r't(.[a-z]+)$', r'\1', picurl)
+        picurl = re.sub(r't(.[a-z]+)$', r'\1', picurl)
 
 #        print('picurl=' + picurl)
 
@@ -169,6 +192,7 @@ def download_pics(url):
 # ファイル名に使用できない、使用しない方がいい文字を削除
 #
 
+
 def cleanPath(path):
     path = path.strip()  # 文字列の前後の空白を削除
     path = path.replace('|', '')
@@ -179,6 +203,7 @@ def cleanPath(path):
 #
 # メイン
 #
+
 
 if __name__ == '__main__':
     for url in sys.argv[1:]:
