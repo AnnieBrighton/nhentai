@@ -11,11 +11,20 @@ import os
 import zipfile
 import getopt
 import shutil
+import errno
+import select
+from time import sleep
+import threading
+import logging
 
 # ファイルをダウンロードし、zipファイルを作成する作業ディレクトリ
 TMPPATH = '/tmp'
 
 HTTP_CLIENT_CHUNK_SIZE = 10240
+
+FIFO = '/tmp/nhentai_pipe'
+
+logging.basicConfig(level=logging.INFO, format='%(threadName)s: %(message)s')
 
 req = requests.session()
 req.headers = {
@@ -34,7 +43,7 @@ req.headers = {
 
 def downloadImageFile(dir, imgurl):
     filename = dir + '/' + imgurl.split('/')[-1]
-    print("Download Image File=" + filename)
+    logging.info('Download Image File=%s', filename)
 
     for retry in range(0, 10):
         try:
@@ -44,7 +53,7 @@ def downloadImageFile(dir, imgurl):
             length = int(r.headers['Content-Length'])
 
             if (os.path.exists(filename)) and (os.stat(filename).st_size == length):
-                print('Used exists file:' + imgurl)
+                logging.info('Used exists file=%s', imgurl)
             else:
                 # ファイルが存在しない、または、ファイルサイズとダウンロードサイズが異なる。
                 with open(filename, 'wb') as f:
@@ -59,23 +68,25 @@ def downloadImageFile(dir, imgurl):
             if info.st_size == length:
                 return filename
             else:
-                print('Download size mismatch file size:' + str(info.st_size) + ' Content-Length:' + length)
+                logging.info('Download size mismatch file size:%d Content-Length:%d', info.st_size, length)
                 continue
 
         except requests.exceptions.ConnectionError:
-            print('ConnectionError:' + imgurl)
+            logging.info('ConnectionError:%s', imgurl)
             continue
         except requests.exceptions.Timeout:
-            print('Timeout:' + imgurl)
+            logging.info('Timeout:%s', imgurl)
             continue
         except requests.exceptions.ReadTimeout:
-            print('Timeout:' + imgurl)
+            logging.info('ReadTimeout:%s', imgurl)
             continue
 
     # リトライ回数をオーバーで終了
-    print('Retry over:' + imgurl)
+    logging.info('Retry over:%s', imgurl)
     sys.exit()
+
 #
+# ディレクトリ作成
 #
 
 
@@ -115,6 +126,19 @@ def zip_dir(dirname, zipfilename):
     zf.close()
 
 #
+# ファイル名に使用できない、使用しない方がいい文字を削除
+#
+
+
+def cleanPath(path):
+    path = path.strip()  # 文字列の前後の空白を削除
+    path = path.replace('|', '')
+    path = path.replace(':', '')
+    path = path.replace('/', '')
+    return path
+
+
+#
 #
 #
 
@@ -127,10 +151,14 @@ def download_pics(url):
     for retry in range(0, 11):
         # タイトル・イメージリストの取得に失敗した場合終了する
         if retry == 10:
-            print('Title and image list get error:' + url)
+            logging.info('Title and image list get error:%s', url)
             return False
 
-        index = lxml.etree.HTML(req.get(url).text)
+        try:
+            index = lxml.etree.HTML(req.get(url).text)
+        except requests.exceptions.ConnectionError:
+            logging.info('ConnectionError:%s', url)
+            continue
 
         # < divid = "info" >
         #  < h1 class = "title" >
@@ -188,26 +216,73 @@ def download_pics(url):
 
     return True
 
-#
-# ファイル名に使用できない、使用しない方がいい文字を削除
-#
+
+def read_thread():
+    logging.info('Opening FIFO...')
+    r_fd = os.open(FIFO, os.O_RDONLY | os.O_NONBLOCK)
+    logging.info('FIFO read opened')
+    read_pipe = os.fdopen(r_fd, 'r')
+    remove = False
+    while True:
+        rfd, _, _ = select.select([r_fd], [], [], 5)
+        if len(rfd) == 0:
+            logging.info('Timeout')
+            if remove:
+                return
+            sleep(3)
+            os.remove(FIFO)
+            remove = True
+            continue
+
+        data = read_pipe.readline().replace('\n', '')
+        if len(data) == 0:
+            if remove:
+                return
+            else:
+                continue
+
+        download_pics(data)
 
 
-def cleanPath(path):
-    path = path.strip()  # 文字列の前後の空白を削除
-    path = path.replace('|', '')
-    path = path.replace(':', '')
-    path = path.replace('/', '')
-    return path
+def run_thread():
+    try:
+        logging.info('create FIFO')
+        os.mkfifo(FIFO, 0o777)
+        t = threading.Thread(target=read_thread)
+        t.start()
+        return t
+    except OSError as oe:
+        if oe.errno != errno.EEXIST:
+            raise
+    return None
+
+
+def push_pipe():
+    w_fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
+    logging.info('FIFO write opened')
+    write_pipe = os.fdopen(w_fd, 'w')
+
+    for url in sys.argv[1:]:
+        if url[-1] == '/':
+            write_pipe.write(url[:-1] + '\n')
+        else:
+            write_pipe.write(url + '\n')
+
+    write_pipe.close()
 
 #
 # メイン
 #
 
 
+def main():
+    t = run_thread()
+
+    sleep(1)
+    push_pipe()
+    if t is not None:
+        t.join()
+
+
 if __name__ == '__main__':
-    for url in sys.argv[1:]:
-        if url[-1] == '/':
-            download_pics(url[:-1])
-        else:
-            download_pics(url)
+    main()
