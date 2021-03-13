@@ -13,9 +13,10 @@ import getopt
 import shutil
 import errno
 import select
-from time import sleep
-import threading
 import logging
+from time import sleep
+from threading import Thread
+from queue import Queue
 
 # ファイルをダウンロードし、zipファイルを作成する作業ディレクトリ
 TMPPATH = '/tmp'
@@ -217,40 +218,90 @@ def download_pics(url):
     return True
 
 
-def read_thread():
-    logging.info('Opening FIFO...')
+def download_thread(queue, cqueue):
+    """
+    ・ダウンロードスレッド … キューからURLを読み取り、URLイメージをダウンロードする。
+    """
+    while True:
+        # キューからURLを取り出す。
+        url = queue.get()
+        logging.info('get queue url %s', url)
+        if url is None:
+            # キューの処理通知
+            queue.task_done()
+            break
+
+        # 取り出したURLのダウンロード
+        download_pics(url)
+
+        # キューの処理通知
+        queue.task_done()
+        cqueue.get()
+
+
+def read_thread(queue, cqueue):
+    """
+    ・パイプリードスレッド … パイプからURLを読み取り、キューに格納する。
+    """
+    #logging.info('Opening FIFO...')
     r_fd = os.open(FIFO, os.O_RDONLY | os.O_NONBLOCK)
-    logging.info('FIFO read opened')
+    #logging.info('FIFO read opened')
     read_pipe = os.fdopen(r_fd, 'r')
     remove = False
     while True:
         rfd, _, _ = select.select([r_fd], [], [], 5)
-        if len(rfd) == 0:
-            logging.info('Timeout')
-            if remove:
-                return
-            sleep(3)
-            os.remove(FIFO)
-            remove = True
-            continue
 
-        data = read_pipe.readline().replace('\n', '')
-        if len(data) == 0:
+        # Time out check
+        if len(rfd) == 0:
+            # pipeファイル削除後のタイムアウトならば、パイプからの読み込みを終了
             if remove:
-                return
-            else:
+                break
+
+            # 処理中キューが空
+            if cqueue.empty():
+                os.remove(FIFO)
+                remove = True
+                continue
+        else:
+            url = read_pipe.readline().replace('\n', '')
+            if len(url) == 0:
                 continue
 
-        download_pics(data)
+            # キューにURLを格納
+            logging.info('put queue url %s', url)
+            queue.put(url)
+            cqueue.put('x')
+
+    # download threadに終了を通知
+    queue.put(None)
+    queue.join()
 
 
 def run_thread():
+    """
+    パイプファイル、キューの作成 、 スレッドの起動
+    すでにパイプファイルが存在する場合 、 スレッドは起動せず復帰する 。
+    ・パイプリードスレッド … パイプからURLを読み取り、キューに格納する。
+    ・ダウンロードスレッド … キューからURLを読み取り、URLイメージをダウンロードする。
+    """
     try:
-        logging.info('create FIFO')
+        #logging.info('create FIFO')
+
+        # パイプ作成
         os.mkfifo(FIFO, 0o777)
-        t = threading.Thread(target=read_thread)
-        t.start()
-        return t
+
+        # キュー作成
+        q = Queue()
+        cq = Queue()
+
+        # ダウンロードスレッド起動
+        Thread(target=download_thread, args=([q, cq])).start()
+
+        # パイプからURL取得スレッド起動
+        rt = Thread(target=read_thread, args=([q, cq]))
+        rt.start()
+
+        return rt
     except OSError as oe:
         if oe.errno != errno.EEXIST:
             raise
@@ -258,11 +309,15 @@ def run_thread():
 
 
 def push_pipe():
+    """
+    引数で指定するURLをパイプファイルに書き込む
+    """
     w_fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
-    logging.info('FIFO write opened')
+    #logging.info('FIFO write opened')
     write_pipe = os.fdopen(w_fd, 'w')
 
     for url in sys.argv[1:]:
+        logging.info('put pipe url %s', url)
         if url[-1] == '/':
             write_pipe.write(url[:-1] + '\n')
         else:
@@ -276,13 +331,22 @@ def push_pipe():
 
 
 def main():
-    t = run_thread()
+    rt = run_thread()
 
     sleep(1)
     push_pipe()
-    if t is not None:
-        t.join()
+
+    if rt is not None:
+        rt.join()
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except OSError as oe:
+        if oe.errno == errno.ENXIO:
+            # pipeファイルが存在するが、readでオープンされていない場合
+            # 一度、pipeファイルを削除し、最初からやり直す。
+            logging.info('download retry')
+            os.remove(FIFO)
+            main()
