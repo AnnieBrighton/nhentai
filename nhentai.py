@@ -201,9 +201,21 @@ def download_pics(url):
 
     for imgtag in AllImgURL:
         picurl = imgtag.attrib['data-src']
-        picurl = picurl.replace('t.nhentai.net', 'i.nhentai.net')
+        picurl = re.sub(r't([0-9]*).nhentai.net', r'i\1.nhentai.net', picurl)
         picurl = re.sub(r't(.[a-z]+)$', r'\1', picurl)
+        # <a class="gallerythumb" href="/g/394364/1/" rel="nofollow">
+        #   <img class="lazyload" width="200" height="284" data-src="https://t5.nhentai.net/galleries/2157708/1t.jpg" src="https://t3.nhentai.net/galleries/2157708/1t.jpg">
+        #   <noscript>
+        #   <img src="https://t5.nhentai.net/galleries/2157708/1t.jpg" width="200" height="284"  />
+        #   </noscript>
+        # </a>
 
+        # //*[@id="image-container"]/a/img
+        # <section id="image-container" class="fit-horizontal full-height zoom-100">
+        #   <a href="/g/394364/2/">
+        #     <img src="https://i5.nhentai.net/galleries/2157708/1.jpg" width="1055" height="1500">
+        #   </a>
+        # </section>
 #        print('picurl=' + picurl)
 
         # 1ページ分のイメージを取得
