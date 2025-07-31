@@ -17,6 +17,10 @@ import logging
 from time import sleep
 from threading import Thread
 from queue import Queue
+from subprocess import Popen
+import pychrome
+import chromedriver_autoinstaller
+
 
 # ファイルをダウンロードし、zipファイルを作成する作業ディレクトリ
 TMPPATH = '/tmp'
@@ -25,15 +29,18 @@ HTTP_CLIENT_CHUNK_SIZE = 10240
 
 FIFO = '/tmp/nhentai_pipe'
 
-logging.basicConfig(level=logging.INFO, format='%(threadName)s: %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(threadName)s: %(message)s', filename='nHentai.log')
+console = logging.StreamHandler()
+console.setFormatter(logging.Formatter('%(asctime)s %(threadName)s: %(message)s'))
+logging.getLogger('').addHandler(console)
 
 req = requests.session()
 req.headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:43.0) Gecko/20100101 Firefox/43.0',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3',
-    'Accept-Encoding': 'gzip, deflate',
-    'Connection': 'keep-alive',
+    #    'Accept-Encoding': 'gzip, deflate',
+    #    'Connection': 'keep-alive',
     'Cache-Control': 'max-age=0',
 }
 
@@ -74,12 +81,15 @@ def downloadImageFile(dir, imgurl):
 
         except requests.exceptions.ConnectionError:
             logging.info('ConnectionError:%s', imgurl)
-            continue
-        except requests.exceptions.Timeout:
-            logging.info('Timeout:%s', imgurl)
+            sleep(2)
             continue
         except requests.exceptions.ReadTimeout:
             logging.info('ReadTimeout:%s', imgurl)
+            sleep(2)
+            continue
+        except requests.exceptions.Timeout:
+            logging.info('Timeout:%s', imgurl)
+            sleep(2)
             continue
 
     # リトライ回数をオーバーで終了
@@ -144,27 +154,22 @@ def cleanPath(path):
 #
 
 
-def download_pics(url):
+def download_pics(tab, url: str):
     title = ''
     basedir = TMPPATH + '/' + 'tmpimg_' + url.split("/")[-1]
     mkdir(basedir)
 
-    for retry in range(0, 11):
-        # タイトル・イメージリストの取得に失敗した場合終了する
-        if retry == 10:
-            logging.info('Title and image list get error:%s', url)
-            return False
-
-        try:
-            index = lxml.etree.HTML(req.get(url).text)
-        except requests.exceptions.ConnectionError:
-            logging.info('ConnectionError:%s', url)
-            continue
+    sleep(1)
+    chrome_get(tab, url)
+    for _ in range(0, 100):
+        HTML = chrome_getDOM(tab)
+        # print(HTML)
+        index = lxml.etree.HTML(HTML)
 
         # < divid = "info" >
         #  < h1 class = "title" >
         #    <span class="before"></span>
-        #    <span class="pretty">COMIC Ananga Ranga Vol. 60</span>
+        #    <span class="prety">COMIC Ananga Ranga Vol. 60</span>
         #    <span class="after"></span>
         #   </h1>
         #  <h2 class="title">
@@ -173,9 +178,18 @@ def download_pics(url):
         #   <span class="after"></span>
         #  </h2>
 
+        if index is None:
+            # DOMの中にまだタイトル情報がない。
+            print('none index info retry')
+            sleep(3)
+            continue
+
         info = index.xpath('//*[@id="info"]/*[@class="title"]')
+
         if len(info) == 0:
-            # タイトルが取得出来ない場合、htmlの取得に失敗している可能性のためリトライを行う
+            # DOMの中にまだタイトル情報がない。
+            print('none title info retry')
+            sleep(3)
             continue
 
         # info配下が一つの場合、英語表記のみ取得、それ以外は日本語表記を取得する。
@@ -184,25 +198,57 @@ def download_pics(url):
         else:
             info = info[1]
 
-        #print(lxml.etree.tostring(info, pretty_print=True))
-        for span in info.xpath('span'):
-            #print(lxml.etree.tostring(span, pretty_print=True))
-            if span.text and span.text != '[DL版]':
-                title = title + span.text
-        print(title)
-
         break
+    else:
+        print('retry out')
+        return
+
+    # https://learn.microsoft.com/ja-jp/windows/win32/inputdev/virtual-key-codes?redirectedfrom=MSDN
+    # VK_DOWN
+    # VK_DOWN = int(0x28)
+    # VK_NEXT = int(0x22)
+    # key = VK_NEXT
+    # for _ in range(1, 20):
+    #    print('char=Down')
+    #    tab.Input.dispatchKeyEvent(type='keyDown', windowsVirtualKeyCode=key, nativeVirtualKeyCode=key)
+    #    tab.Input.dispatchKeyEvent(type='keyUp', windowsVirtualKeyCode=key, nativeVirtualKeyCode=key)
+    #    sleep(0.5)
+
+    # print(lxml.etree.tostring(info, pretty_print=True))
+    for span in info.xpath('span'):
+        # print(lxml.etree.tostring(span, pretty_print=True))
+        if span.text and span.text != '[DL版]':
+            title = title + span.text
+    print(title)
 
     basename = cleanPath(title)
     print(basedir + '/' + basename)
     mkdir(basedir + '/' + basename)
 
+    sleep(2)
+    html = chrome_getDOM(tab)
+    sleep(2)
+    index = lxml.etree.HTML(html)
+    sleep(2)
     AllImgURL = index.xpath('//div[@class="thumb-container"]/a/img')
 
     for imgtag in AllImgURL:
+        data_src = imgtag.attrib['data-src']
+        src = imgtag.attrib['src']
         picurl = imgtag.attrib['data-src']
+        # picurl = imgtag.attrib['src']
+        print(picurl)
+        if picurl[0:6] != "https:":
+            picurl = "https:" + picurl
+        print(picurl)
         picurl = re.sub(r't([0-9]*).nhentai.net', r'i\1.nhentai.net', picurl)
-        picurl = re.sub(r't(.[a-z]+)$', r'\1', picurl)
+        # picurl = re.sub(r't([0-9]*).nhentai.net', r'i5.nhentai.net', picurl)
+        # picurl = re.sub(r't(.[a-z]+)$', r'\1', picurl)
+        picurl = re.sub(r'\.webp\.webp', r'.webp', picurl)
+        picurl = re.sub(r'\.jpeg\.webp', r'.jpeg', picurl)
+        picurl = re.sub(r'\.jpg\.webp', r'.jpg', picurl)
+        picurl = re.sub(r'([0-9]+)t\.', r'\1.', picurl)
+        logging.info(f"{data_src=}, {src=}, {picurl=}")
         # <a class="gallerythumb" href="/g/394364/1/" rel="nofollow">
         #   <img class="lazyload" width="200" height="284" data-src="https://t5.nhentai.net/galleries/2157708/1t.jpg" src="https://t3.nhentai.net/galleries/2157708/1t.jpg">
         #   <noscript>
@@ -216,7 +262,8 @@ def download_pics(url):
         #     <img src="https://i5.nhentai.net/galleries/2157708/1.jpg" width="1055" height="1500">
         #   </a>
         # </section>
-#        print('picurl=' + picurl)
+
+        # print('picurl=' + picurl)
 
         # 1ページ分のイメージを取得
         downloadImageFile(basedir + '/' + basename, picurl)
@@ -230,10 +277,101 @@ def download_pics(url):
     return True
 
 
+#
+user_dir = os.path.join(os.environ.get('TEMP', '/tmp'), 'google-chrome_{0:08d}'.format(os.getpid()))
+
+# chrome_app = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+chrome_app = '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'
+
+
+def chrome_start(headless=False):
+    try:
+        # chrome用ユーザディレクトリの作成
+        os.makedirs(user_dir, exist_ok=False)
+    except FileExistsError:
+        pass
+
+    opt = [chrome_app]
+    opt.append('--user-data-dir=' + user_dir)
+    if headless:
+        # opt.append('--headless=new')
+        opt.append('--window-size=800,600')
+    else:
+        opt.append('--window-size=800,600')
+    opt.append('--no-first-run')
+    opt.append('--no-default-browser-check')
+    opt.append('--homepage=about:blank')
+
+    opt.append('--remote-allow-origins=http://127.0.0.1:19222')
+    # opt.append('--remote-allow-origins=*')
+    opt.append('--remote-debugging-port=19222')
+    # opt.append('--blink-settings=imagesEnabled=false')
+    # https://senablog.com/python-selenium-chrome-option/#
+
+    proc = Popen(opt)
+
+    sleep(10)
+
+    browser = pychrome.Browser(url="http://127.0.0.1:19222")
+
+    # list all tabs (default has a blank tab)
+    # tabs = browser.list_tab()
+
+    # if not tabs:
+    # create a tab
+    # tab = browser.new_tab()
+    # else:
+    # tab = tabs[0]
+
+    tab = browser.new_tab()
+    tab.start()
+    tab.Network.enable()
+
+    return browser, proc, tab
+
+
+def chrome_stop(browser, proc, tab) -> None:
+    tab.stop()
+
+    # wait for loading
+    tab.wait(5)
+
+    # close tab
+    browser.close_tab(tab)
+
+    # chrome終了
+    proc.kill()
+
+    # 起動時に、user_dirが存在しなければ削除する
+    shutil.rmtree(user_dir)
+
+
+def chrome_get(tab, url: str) -> None:
+    # call method with timeout
+    tab.Page.navigate(url=url, _timeout=60)
+
+
+def chrome_getDOM(tab) -> str:
+    for _ in range(0, 10):
+        try:
+            root = tab.DOM.getDocument()
+            HTML = tab.DOM.getOuterHTML(nodeId=root['root']['nodeId'])
+            # print(HTML)
+            return HTML['outerHTML']
+        except pychrome.exceptions.CallMethodException:
+            sleep(1)
+    else:
+        return None
+
+
 def download_thread(queue, cqueue):
     """
     ・ダウンロードスレッド … キューからURLを読み取り、URLイメージをダウンロードする。
     """
+
+    # chromeをheadlessモードで起動
+    (browser, proc, tab) = chrome_start(True)
+
     while True:
         # キューからURLを取り出す。
         url = queue.get()
@@ -243,21 +381,22 @@ def download_thread(queue, cqueue):
             queue.task_done()
             break
 
-        # 取り出したURLのダウンロード
-        download_pics(url)
+        download_pics(tab, url)
 
         # キューの処理通知
         queue.task_done()
         cqueue.get()
+
+    chrome_stop(browser, proc, tab)
 
 
 def read_thread(queue, cqueue):
     """
     ・パイプリードスレッド … パイプからURLを読み取り、キューに格納する。
     """
-    #logging.info('Opening FIFO...')
+    # logging.info('Opening FIFO...')
     r_fd = os.open(FIFO, os.O_RDONLY | os.O_NONBLOCK)
-    #logging.info('FIFO read opened')
+    # logging.info('FIFO read opened')
     read_pipe = os.fdopen(r_fd, 'r')
     remove = False
     while True:
@@ -297,7 +436,7 @@ def run_thread():
     ・ダウンロードスレッド … キューからURLを読み取り、URLイメージをダウンロードする。
     """
     try:
-        #logging.info('create FIFO')
+        # logging.info('create FIFO')
 
         # パイプ作成
         os.mkfifo(FIFO, 0o777)
@@ -325,7 +464,7 @@ def push_pipe():
     引数で指定するURLをパイプファイルに書き込む
     """
     w_fd = os.open(FIFO, os.O_WRONLY | os.O_NONBLOCK)
-    #logging.info('FIFO write opened')
+    # logging.info('FIFO write opened')
     write_pipe = os.fdopen(w_fd, 'w')
 
     for url in sys.argv[1:]:
