@@ -4,12 +4,9 @@
 import requests
 import lxml.etree
 import sys
-import codecs
 import re
-import time
 import os
 import zipfile
-import getopt
 import shutil
 import errno
 import select
@@ -19,7 +16,6 @@ from threading import Thread
 from queue import Queue
 from subprocess import Popen
 import pychrome
-import chromedriver_autoinstaller
 
 
 # ファイルをダウンロードし、zipファイルを作成する作業ディレクトリ
@@ -53,11 +49,21 @@ def downloadImageFile(dir, imgurl):
     filename = dir + '/' + imgurl.split('/')[-1]
     logging.info('Download Image File=%s', filename)
 
-    for retry in range(0, 10):
+    for _ in range(0, 10):
         try:
             r = req.get(imgurl, stream=True, timeout=(10.0, 10.0))
 
-            # print 'status_code:' + str(r.status_code)
+            # print(f"{r.status_code=}")
+            if r.status_code == 404:
+                imgurl = imgurl.replace('.png.webp', '.png')
+                imgurl = imgurl.replace('.jpg.webp', '.jpg')
+                imgurl = imgurl.replace('.jpeg.webp', '.jpeg')
+                filename = filename.replace('.png.webp', '.png')
+                filename = filename.replace('.jpg.webp', '.jpg')
+                filename = filename.replace('.jpeg.webp', '.jpeg')
+                # print(f"{imgurl=} {filename=}")
+                continue
+
             length = int(r.headers['Content-Length'])
 
             if (os.path.exists(filename)) and (os.stat(filename).st_size == length):
@@ -121,10 +127,11 @@ def zip_dir(dirname, zipfilename):
 
     # 同じファイルのzipファイルが存在するかチェック
     r = ''
-    for i in range(0, 10):
-        name = zipfilename + r + '.zip'
+    name = zipfilename + r + '.cbz'
+    for _ in range(0, 10):
         if (os.path.exists(name)):
             r = r + '_'
+            name = zipfilename + r + '.cbz'
             continue
         else:
             break
