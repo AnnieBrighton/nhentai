@@ -235,7 +235,7 @@ def downloadImageFile(dirpath: str, imgurl: str) -> str:
             continue
 
     logging.info("All candidates failed: url=%s err=%s", imgurl, last_err)
-    sys.exit()
+    return None
 
 
 # ========= ユーティリティ =========
@@ -295,34 +295,42 @@ def download_pics(tab, url: str):
     basedir = TMPPATH + '/' + 'tmpimg_' + url.split("/")[-1]
     mkdir(basedir)
 
-    sleep(1)
-    chrome_get(tab, url)
-    for _ in range(0, 100):
-        HTML = chrome_getDOM(tab)
-        index = lxml.etree.HTML(HTML)
+    for _ in range(0, 5):
+        sleep(1)
+        chrome_get(tab, url)
+        for _ in range(0, 2):
+            HTML = chrome_getDOM(tab)
+            index = lxml.etree.HTML(HTML)
 
-        if index is None:
-            logging.info('none index info retry')
-            sleep(3)
-            continue
+            if index is None:
+                logging.info('none index info retry')
+                sleep(3)
+                continue
 
-        info = index.xpath('//*[@id="info"]/*[@class="title"]')
-        if len(info) == 0:
-            logging.info('none title info retry')
-            sleep(3)
-            continue
+            info = index.xpath('//*[@id="info"]/*[contains(@class, "title")]')
+            if len(info) == 0:
+                logging.info('none title info retry')
+                sleep(3)
+                continue
 
-        # info配下が一つの場合、英語表記のみ取得、それ以外は日本語表記を取得する。
-        if len(info) == 1:
-            info = info[0]
+            # info配下が一つの場合、英語表記のみ取得、それ以外は日本語表記を取得する。
+            if len(info) == 1:
+                info = info[0]
+            else:
+                info = info[1]
+            break
         else:
-            info = info[1]
+            # 内側の for が break されなかった場合だけ実行される
+            continue
+
+        # 内側の for が break された場合ここに来る
         break
+
     else:
         logging.info('retry out')
         return
 
-    title = info.text
+    title = info.text if info.text is not None else ""
     for span in info.xpath('span'):
         if span.text and span.text != '[DL版]':
             title = title + span.text
@@ -337,7 +345,7 @@ def download_pics(tab, url: str):
     sleep(2)
     index = lxml.etree.HTML(html)
     sleep(2)
-    AllImgURL = index.xpath('//div[@class="thumb-container"]/a/img')
+    AllImgURL = index.xpath('//div[contains(@class,"thumb-container")]/a/img')
 
     for imgtag in AllImgURL:
         data_src = imgtag.attrib.get('data-src', '')
