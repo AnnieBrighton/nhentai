@@ -39,9 +39,9 @@ WEBP_LOSSLESS_FOR_PNG = True  # PNG(透過が多い)は基本lossless推奨
 
 # ========= ログ =========
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(threadName)s: %(message)s', filename='nHentai.log')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(threadName)s: %(levelname)s: %(message)s', filename='nHentai.log')
 console = logging.StreamHandler()
-console.setFormatter(logging.Formatter('%(asctime)s %(threadName)s: %(message)s'))
+console.setFormatter(logging.Formatter('%(asctime)s %(threadName)s: %(levelname)s: %(message)s'))
 logging.getLogger('').addHandler(console)
 
 
@@ -246,6 +246,7 @@ def zip_dir(dirname, zipfilename):
         else:
             break
 
+    logging.info(f"create ZIP file {name=}")
     zf = zipfile.ZipFile(name, "w", zipfile.zlib.DEFLATED)
 
     for tar in sorted(filelist):
@@ -370,6 +371,8 @@ class Chrome:
         self.ws = None
         self.serial = 0
         self.user_dir = None
+        self.base_url = None
+        self.tab_id = None
 
     async def start(self):
         import tempfile
@@ -391,11 +394,40 @@ class Chrome:
                 await asyncio.sleep(0.1)
         else:
             raise TimeoutError('Chrome startup timed out')
-        async with self.session.put(f'http://127.0.0.1:{port}/json/new?about:blank') as response:
-            response.raise_for_status()
-            tab = await response.json()
-        self.ws = await self.session.ws_connect(tab['webSocketDebuggerUrl'])
-        await self.call('Network.enable')
+        self.base_url = f'http://127.0.0.1:{port}'
+
+    @contextlib.asynccontextmanager
+    async def new_tab(self):
+        """URL一件の処理に専用タブを貸し出し、終了時に閉じる。"""
+        if self.base_url is None:
+            raise RuntimeError('Chrome has not started')
+        if self.tab_id is not None:
+            raise RuntimeError('Previous tab is still open')
+        try:
+            async with self.session.put(self.base_url + '/json/new?about:blank') as response:
+                response.raise_for_status()
+                tab = await response.json()
+                self.tab_id = tab['id']
+            self.ws = await self.session.ws_connect(tab['webSocketDebuggerUrl'])
+            self.serial = 0
+            await self.call('Network.enable')
+            yield self
+        finally:
+            await self.close_tab()
+
+    async def close_tab(self):
+        """WebSocketの切断だけではタブは閉じないため、Chromeにも閉鎖を要求する。"""
+        try:
+            if self.ws is not None:
+                await self.ws.close()
+        finally:
+            self.ws = None
+            if self.tab_id is not None:
+                async with self.session.get(
+                    self.base_url + '/json/close/' + self.tab_id
+                ) as response:
+                    response.raise_for_status()
+                self.tab_id = None
 
     async def call(self, method, **params):
         # 呼び出し元は単一のconsumer。イベントを読み飛ばし対応する応答を待つ。
@@ -414,8 +446,10 @@ class Chrome:
         return await asyncio.wait_for(receive(), timeout=60)
 
     async def close(self):
-        if self.ws is not None:
-            await self.ws.close()
+        try:
+            await self.close_tab()
+        except Exception:
+            logging.exception('Failed to close tab; shutting down Chrome')
         if self.proc is not None and self.proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 self.proc.terminate()
@@ -427,6 +461,45 @@ class Chrome:
                 await self.proc.wait()
         if self.user_dir:
             shutil.rmtree(self.user_dir, ignore_errors=True)
+
+    async def clear_site_data(
+        self,
+        origin: str,
+        *,
+        clear_http_cache: bool = False,
+        clear_http_cookies: bool = False
+    ) -> None:
+        """現在のタブの対象サイトデータを削除する。"""
+        if self.ws is None:
+            raise RuntimeError("タブが開かれていません")
+
+        # 現在のタブのセッションストレージ
+        await self.call("DOMStorage.enable")
+        await self.call(
+            "DOMStorage.clear",
+            storageId={
+                "securityOrigin": origin,
+                "isLocalStorage": False,
+            },
+        )
+
+        # 対象サイトの保存データ
+        await self.call(
+            "Storage.clearDataForOrigin",
+            origin=origin,
+            storageTypes=(
+                "local_storage,cookies,cache_storage,"
+                "service_workers,indexeddb"
+            ),
+        )
+
+        # Chrome全体のCookieクリア
+        if clear_http_cookies:
+            await self.call("Network.clearBrowserCookies")
+
+        # Chrome全体のHTTPキャッシュクリア
+        if clear_http_cache:
+            await self.call("Network.clearBrowserCache")
 
 
 async def chrome_get(tab, url):
@@ -528,7 +601,9 @@ async def consume(queue, reader, process):
     while True:
         url = await queue.get()  # 最初の入力までは終了せず待機する。
         try:
+            logging.info(f"start {url=}")
             await process(url)
+            logging.info(f"end {url=}")
         finally:
             queue.task_done()
         # 通知コールバックが未実行の入力も終了判定前に取り込む。
@@ -565,9 +640,18 @@ async def main(urls=None, *, fifo=FIFO, process=None):
             async with aiohttp.ClientSession(headers=HTTP_HEADERS, timeout=timeout) as session:
                 chrome = Chrome(session)
                 async def process_url(url):
-                    if chrome.ws is None:
+                    if chrome.proc is None:
                         await chrome.start()
-                    await download_pics(session, chrome, url)
+                    async with chrome.new_tab() as tab:
+                        try:
+                            await download_pics(session, tab, url)
+                        finally:
+                            await tab.clear_site_data(
+                               "https://nhentai.net",
+                                clear_http_cache=True,
+                                clear_http_cookies=True
+                            )
+                            session.cookie_jar.clear()
                 try:
                     await consume(queue, reader, process_url)
                 finally:
